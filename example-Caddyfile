@@ -1,0 +1,56 @@
+{
+	order db_sites before respond
+
+	storage s3 {
+		bucket "prod-ssl-assets"
+		host "prod-ssl-assets.s3.ap-south-1.amazonaws.com"
+		prefix "certs/"
+		use_iam_provider "true"
+	}
+
+	on_demand_tls {
+		ask https://myappzbackend.com/functions/v1/white-label-validate-domain
+	}
+
+	acme_ca https://acme.zerossl.com/v2/DV90
+	acme_eab {
+		key_id ZERO_SSL_EAB_KEY_ID
+		mac_key ZERO_SSL_EAB_MAC_KEY
+	}
+
+	ocsp_stapling off
+	auto_https off
+	email dev@searchy.in
+}
+
+http:// {
+	redir https://{http.request.host}{http.request.uri} 301
+}
+
+https:// {
+	tls {
+		on_demand
+		ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+		protocols tls1.2 tls1.3
+	}
+
+	@health path /health
+	handle @health {
+		respond "OK" 200 {
+			close
+		}
+	}
+
+	metrics /custom-metrics
+
+	header Cache-Control "public, max-age=0, must-revalidate"
+
+	handle {
+		db_sites {
+			database_url "postgres://user:pass@db.example.com:5432/sitebuilder?sslmode=require"
+			cache_ttl 30m
+			negative_cache_ttl 2m
+			cache_control "public, max-age=0, must-revalidate"
+		}
+	}
+}
