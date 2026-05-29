@@ -1,6 +1,6 @@
 # caddy-db-sites-transport
 
-A Caddy v2 HTTP handler for the Website Builder dedicated serving plane.
+A Caddy v2 HTTP handler for the Website Builder dedicated serving plane, backed by PostgreSQL.
 
 The handler resolves an incoming custom domain request to a row in `published_sites`, reads the published `html_content`, and returns it directly as `text/html`. It follows the selected architecture option from the decision document: customer website traffic runs on a dedicated Caddy cluster, separate from the portal/control plane.
 
@@ -72,7 +72,7 @@ caddy list-modules | grep db_sites
 
 | Variable | Description |
 |---|---|
-| `DB_SITES_DATABASE_URL` | Postgres connection URL |
+| `DB_SITES_DATABASE_URL` | PostgreSQL connection URL |
 | `DB_SITES_CACHE_TTL` | Positive cache TTL, default `30m` |
 | `DB_SITES_NEGATIVE_CACHE_TTL` | Not-found cache TTL, default same as positive TTL |
 | `DB_SITES_CACHE_CLEAR_PATH` | Cache clear endpoint, default `/db-sites/cache/clear` |

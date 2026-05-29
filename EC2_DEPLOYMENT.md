@@ -1,6 +1,6 @@
 # EC2 Deployment
 
-This guide deploys the dedicated Website Builder serving plane on an EC2 instance using Caddy built with the `db_sites` plugin.
+This guide deploys the dedicated Website Builder serving plane on an EC2 instance using Caddy built with the `db_sites` plugin. The plugin reads published HTML from PostgreSQL.
 
 ## 1. Provision EC2
 
@@ -17,7 +17,7 @@ Point customer domains to the EC2 public IP or, preferably, to a load balancer i
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y curl git tar
+sudo apt-get install -y curl git tar postgresql-client
 ```
 
 Install Go:
@@ -124,7 +124,14 @@ sudo chmod 600 /etc/caddy/db-sites.env
 sudo chown root:caddy /etc/caddy/db-sites.env
 ```
 
-Use `sslmode=require` for managed Postgres unless your database requires a different TLS mode.
+Use `sslmode=require` for managed PostgreSQL unless your database requires a different TLS mode.
+
+Verify PostgreSQL connectivity from the EC2 instance:
+
+```bash
+source /etc/caddy/db-sites.env
+psql "$DB_SITES_DATABASE_URL" -c "select now();"
+```
 
 ## 6. Configure Caddy
 
@@ -237,7 +244,7 @@ sudo systemctl status caddy --no-pager
 
 ## 8. DNS And Domain Requirements
 
-For a custom domain to serve:
+For a custom domain to serve, PostgreSQL must contain matching rows:
 
 - DNS must point to this serving plane.
 - `platform_domains.domain` must match the request host.
@@ -304,8 +311,8 @@ Common responses:
 For `502`, check:
 
 - `DB_SITES_DATABASE_URL` is correct.
-- EC2 can reach the database security group.
-- Database requires the configured `sslmode`.
+- EC2 can reach the PostgreSQL security group on port `5432`.
+- PostgreSQL requires the configured `sslmode`.
 - Tables and columns match the expected schema.
 
 ## 11. Updating The Plugin
