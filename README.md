@@ -11,7 +11,18 @@ The handler resolves an incoming custom domain request to a row in `published_si
   - Requires `platform_domains.purpose = 'funnel'` or `NULL`
   - Uses `site_funnels.platform_domain_id -> platform_domains.id`
 
-Root/homepage requests use page slug `index`, so `https://example.com/` resolves to the published row for that domain and `sf.slug || '--index'`.
+Root/homepage requests use page slug `home`, so `https://example.com/` resolves to the published row for that domain and `sf.slug || '--home'`.
+
+For custom domains, the domain already identifies the funnel. If the path starts with the mapped funnel slug, the plugin strips that prefix before resolving the page:
+
+| Request path | Page slug |
+|---|---|
+| `/` | `home` |
+| `/home` | `home` |
+| `/about` | `about` |
+| `/{funnel-slug}` | `home` |
+| `/{funnel-slug}/home` | `home` |
+| `/{funnel-slug}/about` | `about` |
 
 ## Installation With xcaddy
 

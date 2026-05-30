@@ -265,7 +265,18 @@ For a custom domain to serve, PostgreSQL must contain matching rows:
 - `published_sites.html_content` must not be `NULL`.
 - The tables must be in `DB_SITES_SCHEMA`, default `public`.
 
-Homepage requests use page slug `index`.
+Homepage requests use page slug `home`.
+
+For custom domains, the domain already maps to the funnel. These paths are normalized before looking up `published_sites`:
+
+| Request path | Page slug |
+|---|---|
+| `/` | `home` |
+| `/home` | `home` |
+| `/about` | `about` |
+| `/{funnel-slug}` | `home` |
+| `/{funnel-slug}/home` | `home` |
+| `/{funnel-slug}/about` | `about` |
 
 Useful checks:
 

@@ -43,8 +43,9 @@ type Handler struct {
 	cache  *responseCache
 	logger *zap.Logger
 
-	customDomainQuery       string
-	customDomainStatusQuery string
+	customDomainFunnelQuery        string
+	customDomainPublishedPageQuery string
+	customDomainStatusQuery        string
 }
 
 type publishedSite struct {
@@ -55,6 +56,14 @@ type publishedSite struct {
 	UpdatedAt   time.Time
 	CacheETag   string
 	ResolvedVia routeKind
+}
+
+type customDomainFunnel struct {
+	ID           string
+	Slug         string
+	Status       string
+	DomainStatus string
+	Purpose      string
 }
 
 func (*Handler) CaddyModule() caddy.ModuleInfo {
@@ -79,7 +88,8 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if !safeIdentifier.MatchString(h.Schema) {
 		return fmt.Errorf("db_sites: invalid schema %q (must match %s)", h.Schema, safeIdentifier.String())
 	}
-	h.customDomainQuery = fmt.Sprintf(customDomainSQLTemplate, qualifiedTable(h.Schema, "published_sites"), qualifiedTable(h.Schema, "site_funnels"), qualifiedTable(h.Schema, "platform_domains"))
+	h.customDomainFunnelQuery = fmt.Sprintf(customDomainFunnelSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"))
+	h.customDomainPublishedPageQuery = fmt.Sprintf(customDomainPublishedPageSQLTemplate, qualifiedTable(h.Schema, "published_sites"))
 	h.customDomainStatusQuery = fmt.Sprintf(customDomainStatusSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"))
 
 	cfg, err := pgxpool.ParseConfig(h.DatabaseURL)
@@ -200,6 +210,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	h.logger.Info("db_sites route resolved",
 		zap.String("host", host),
 		zap.String("route_kind", string(target.Kind)),
+		zap.String("request_path", target.RequestPath),
 		zap.String("page_slug", target.PageSlug),
 		zap.String("schema", h.Schema),
 	)
@@ -291,43 +302,110 @@ func (h *Handler) lookupPublishedSite(ctx context.Context, target routeTarget) (
 }
 
 func (h *Handler) queryPublishedSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
-	var row pgx.Row
 	switch target.Kind {
 	case routeCustomDomain:
-		h.logger.Info("db_sites query published html",
-			zap.String("schema", h.Schema),
-			zap.String("host", target.Host),
-			zap.String("page_slug", target.PageSlug),
-			zap.String("expected_slug_expression", "site_funnels.slug || '--' || page_slug"),
-		)
-		row = h.pool.QueryRow(ctx, h.customDomainQuery, target.Host, target.PageSlug)
+		return h.queryCustomDomainPublishedSite(ctx, target)
 	default:
 		return nil, false, http.StatusNotFound, fmt.Errorf("unknown route kind %q", target.Kind)
 	}
+}
+
+func (h *Handler) queryCustomDomainPublishedSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
+	funnel, found, code, err := h.lookupCustomDomainFunnel(ctx, target)
+	if err != nil || !found {
+		return nil, false, code, err
+	}
+
+	normalizedPageSlug := normalizeCustomDomainPageSlug(target.RequestPath, funnel.Slug)
+	publishedSlug := funnel.Slug + "--" + normalizedPageSlug
+
+	h.logger.Info("db_sites custom domain path normalized",
+		zap.String("host", target.Host),
+		zap.String("request_path", target.RequestPath),
+		zap.String("raw_page_slug", target.PageSlug),
+		zap.String("funnel_slug", funnel.Slug),
+		zap.String("normalized_page_slug", normalizedPageSlug),
+		zap.String("expected_published_slug", publishedSlug),
+	)
 
 	var site publishedSite
 	site.ResolvedVia = target.Kind
+	row := h.pool.QueryRow(ctx, h.customDomainPublishedPageQuery, funnel.ID, publishedSlug)
 	if err := row.Scan(&site.Slug, &site.Title, &site.FunnelType, &site.HTML, &site.UpdatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			h.logger.Info("db_sites published html query returned no rows",
 				zap.String("host", target.Host),
-				zap.String("page_slug", target.PageSlug),
+				zap.String("request_path", target.RequestPath),
+				zap.String("raw_page_slug", target.PageSlug),
+				zap.String("normalized_page_slug", normalizedPageSlug),
+				zap.String("funnel_slug", funnel.Slug),
+				zap.String("expected_published_slug", publishedSlug),
 			)
-			h.logDomainDiagnostics(ctx, target)
-			code, err := h.notFoundStatus(ctx, target)
-			return nil, false, code, err
+			diagTarget := target
+			diagTarget.PageSlug = normalizedPageSlug
+			h.logDomainDiagnostics(ctx, diagTarget)
+			return nil, false, http.StatusNotFound, nil
 		}
 		return nil, false, 0, fmt.Errorf("query published site: %w", err)
 	}
 	site.CacheETag = weakETag(site.HTML)
 	h.logger.Info("db_sites published html row found",
 		zap.String("host", target.Host),
-		zap.String("page_slug", target.PageSlug),
+		zap.String("request_path", target.RequestPath),
+		zap.String("raw_page_slug", target.PageSlug),
+		zap.String("normalized_page_slug", normalizedPageSlug),
+		zap.String("funnel_slug", funnel.Slug),
 		zap.String("published_slug", site.Slug),
 		zap.Int("html_bytes", len(site.HTML)),
 		zap.Time("updated_at", site.UpdatedAt),
 	)
 	return &site, true, http.StatusOK, nil
+}
+
+func (h *Handler) lookupCustomDomainFunnel(ctx context.Context, target routeTarget) (customDomainFunnel, bool, int, error) {
+	h.logger.Info("db_sites query custom domain funnel",
+		zap.String("schema", h.Schema),
+		zap.String("host", target.Host),
+		zap.String("request_path", target.RequestPath),
+		zap.String("raw_page_slug", target.PageSlug),
+	)
+
+	var funnel customDomainFunnel
+	err := h.pool.QueryRow(ctx, h.customDomainFunnelQuery, target.Host).Scan(
+		&funnel.ID,
+		&funnel.Slug,
+		&funnel.Status,
+		&funnel.DomainStatus,
+		&funnel.Purpose,
+	)
+	if err == pgx.ErrNoRows {
+		h.logger.Info("db_sites custom domain funnel query returned no rows",
+			zap.String("host", target.Host),
+		)
+		h.logDomainDiagnostics(ctx, target)
+		code, err := h.notFoundStatus(ctx, target)
+		return customDomainFunnel{}, false, code, err
+	}
+	if err != nil {
+		return customDomainFunnel{}, false, 0, fmt.Errorf("query custom domain funnel: %w", err)
+	}
+
+	h.logger.Info("db_sites custom domain funnel found",
+		zap.String("host", target.Host),
+		zap.String("funnel_id", funnel.ID),
+		zap.String("funnel_slug", funnel.Slug),
+		zap.String("funnel_status", funnel.Status),
+		zap.String("domain_status", funnel.DomainStatus),
+		zap.String("purpose", funnel.Purpose),
+	)
+
+	if funnel.DomainStatus != "verified" || (funnel.Purpose != "" && funnel.Purpose != "funnel") {
+		return customDomainFunnel{}, false, http.StatusForbidden, nil
+	}
+	if funnel.Status != "published" {
+		return customDomainFunnel{}, false, http.StatusLocked, nil
+	}
+	return funnel, true, http.StatusOK, nil
 }
 
 func (h *Handler) notFoundStatus(ctx context.Context, target routeTarget) (int, error) {
@@ -616,7 +694,20 @@ type domainDiagnostic struct {
 	HTMLBytes             sql.NullInt64
 }
 
-const customDomainSQLTemplate = `
+const customDomainFunnelSQLTemplate = `
+SELECT
+	sf.id::text,
+	sf.slug,
+	sf.status,
+	pd.status,
+	COALESCE(pd.purpose, '')
+FROM %s pd
+JOIN %s sf ON sf.platform_domain_id = pd.id
+WHERE lower(pd.domain) = lower($1)
+   OR lower(sf.domain) = lower($1)
+LIMIT 1`
+
+const customDomainPublishedPageSQLTemplate = `
 SELECT
 	ps.slug,
 	COALESCE(ps.title, ''),
@@ -624,13 +715,8 @@ SELECT
 	ps.html_content,
 	ps.updated_at
 FROM %s ps
-JOIN %s sf ON sf.id = ps.funnel_id
-JOIN %s pd ON pd.id = sf.platform_domain_id
-WHERE (lower(pd.domain) = lower($1) OR lower(ps.custom_domain) = lower($1) OR lower(sf.domain) = lower($1))
-  AND pd.status = 'verified'
-  AND (pd.purpose = 'funnel' OR pd.purpose IS NULL)
-  AND sf.status = 'published'
-  AND ps.slug = sf.slug || '--' || $2
+WHERE ps.funnel_id::text = $1
+  AND ps.slug = $2
   AND ps.html_content IS NOT NULL
 LIMIT 1`
 

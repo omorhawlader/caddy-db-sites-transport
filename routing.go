@@ -14,9 +14,10 @@ const (
 )
 
 type routeTarget struct {
-	Kind     routeKind
-	Host     string
-	PageSlug string
+	Kind        routeKind
+	Host        string
+	RequestPath string
+	PageSlug    string
 }
 
 func normalizeHost(hostport string) string {
@@ -41,10 +42,34 @@ func resolveTarget(host, requestPath string) routeTarget {
 	cleaned := path.Clean("/" + requestPath)
 	segments := pathSegments(cleaned)
 	return routeTarget{
-		Kind:     routeCustomDomain,
-		Host:     host,
-		PageSlug: pageSlugFromSegments(segments, 0),
+		Kind:        routeCustomDomain,
+		Host:        host,
+		RequestPath: requestPath,
+		PageSlug:    pageSlugFromSegments(segments, 0),
 	}
+}
+
+func normalizeCustomDomainPageSlug(urlPath string, funnelSlug string) string {
+	p := strings.Trim(urlPath, "/")
+
+	if p == "" {
+		return "home"
+	}
+
+	if p == funnelSlug {
+		return "home"
+	}
+
+	prefix := funnelSlug + "/"
+	if strings.HasPrefix(p, prefix) {
+		p = strings.TrimPrefix(p, prefix)
+	}
+
+	if p == "" {
+		return "home"
+	}
+
+	return p
 }
 
 func pathSegments(cleanPath string) []string {
