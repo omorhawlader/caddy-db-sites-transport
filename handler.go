@@ -487,7 +487,12 @@ func (h *Handler) logDatabaseMetadata(ctx context.Context) {
 }
 
 func (h *Handler) logDomainDiagnostics(ctx context.Context, target routeTarget) {
-	rows, err := h.pool.Query(ctx, fmt.Sprintf(domainDiagnosticsSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"), qualifiedTable(h.Schema, "published_sites")), target.Host, target.PageSlug)
+	rows, err := h.pool.Query(ctx, fmt.Sprintf(domainDiagnosticsSQLTemplate,
+		qualifiedTable(h.Schema, "platform_domains"),
+		qualifiedTable(h.Schema, "site_funnels"),
+		qualifiedTable(h.Schema, "site_pages"),
+		qualifiedTable(h.Schema, "published_sites"),
+	), target.Host, target.PageSlug)
 	if err != nil {
 		h.logger.Warn("db_sites 404 diagnostics query failed",
 			zap.String("host", target.Host),
@@ -510,6 +515,14 @@ func (h *Handler) logDomainDiagnostics(ctx context.Context, target routeTarget) 
 			&d.FunnelSlug,
 			&d.FunnelStatus,
 			&d.FunnelDomain,
+			&d.PlatformDomainID,
+			&d.SitePageID,
+			&d.SitePageSlug,
+			&d.SitePageName,
+			&d.SitePageIsHomepage,
+			&d.SitePageStatus,
+			&d.SitePageHTMLBytes,
+			&d.SitePageUpdatedAt,
 			&d.ExpectedPublishedSlug,
 			&d.PublishedSlug,
 			&d.PublishedCustomDomain,
@@ -531,6 +544,14 @@ func (h *Handler) logDomainDiagnostics(ctx context.Context, target routeTarget) 
 			zap.String("funnel_slug", nullStringValue(d.FunnelSlug)),
 			zap.String("funnel_status", nullStringValue(d.FunnelStatus)),
 			zap.String("funnel_domain", nullStringValue(d.FunnelDomain)),
+			zap.String("platform_domain_id", nullStringValue(d.PlatformDomainID)),
+			zap.String("site_page_id", nullStringValue(d.SitePageID)),
+			zap.String("site_page_slug", nullStringValue(d.SitePageSlug)),
+			zap.String("site_page_name", nullStringValue(d.SitePageName)),
+			zap.Bool("site_page_is_homepage", nullBoolValue(d.SitePageIsHomepage)),
+			zap.String("site_page_status", nullStringValue(d.SitePageStatus)),
+			zap.Int64("site_page_html_bytes", nullInt64Value(d.SitePageHTMLBytes)),
+			zap.String("site_page_updated_at", nullTimeValue(d.SitePageUpdatedAt)),
 			zap.String("expected_published_slug", nullStringValue(d.ExpectedPublishedSlug)),
 			zap.String("published_slug", nullStringValue(d.PublishedSlug)),
 			zap.String("published_custom_domain", nullStringValue(d.PublishedCustomDomain)),
@@ -559,6 +580,20 @@ func nullInt64Value(v sql.NullInt64) int64 {
 	return v.Int64
 }
 
+func nullBoolValue(v sql.NullBool) bool {
+	if !v.Valid {
+		return false
+	}
+	return v.Bool
+}
+
+func nullTimeValue(v sql.NullTime) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.Time.Format(time.RFC3339)
+}
+
 type domainDiagnostic struct {
 	PlatformDomain        sql.NullString
 	PlatformDomainStatus  sql.NullString
@@ -567,6 +602,14 @@ type domainDiagnostic struct {
 	FunnelSlug            sql.NullString
 	FunnelStatus          sql.NullString
 	FunnelDomain          sql.NullString
+	PlatformDomainID      sql.NullString
+	SitePageID            sql.NullString
+	SitePageSlug          sql.NullString
+	SitePageName          sql.NullString
+	SitePageIsHomepage    sql.NullBool
+	SitePageStatus        sql.NullString
+	SitePageHTMLBytes     sql.NullInt64
+	SitePageUpdatedAt     sql.NullTime
 	ExpectedPublishedSlug sql.NullString
 	PublishedSlug         sql.NullString
 	PublishedCustomDomain sql.NullString
@@ -610,13 +653,26 @@ SELECT
 	sf.slug,
 	sf.status,
 	sf.domain,
-	CASE WHEN sf.slug IS NULL THEN NULL ELSE sf.slug || '--' || $2 END AS expected_published_slug,
+	sf.platform_domain_id::text,
+	sp.id::text,
+	sp.slug,
+	sp.name,
+	sp.is_homepage,
+	sp.status,
+	LENGTH(sp.html_content),
+	sp.updated_at,
+	CASE
+		WHEN sf.slug IS NULL THEN NULL
+		WHEN COALESCE(sp.slug, $2) = '' THEN sf.slug || '--index'
+		ELSE sf.slug || '--' || COALESCE(sp.slug, $2)
+	END AS expected_published_slug,
 	ps.slug,
 	ps.custom_domain,
 	LENGTH(ps.html_content)
 FROM %s pd
 LEFT JOIN %s sf ON sf.platform_domain_id = pd.id
-LEFT JOIN %s ps ON ps.funnel_id = sf.id AND ps.slug = sf.slug || '--' || $2
+LEFT JOIN %s sp ON sp.funnel_id = sf.id AND (sp.slug = $2 OR ($2 = 'index' AND sp.is_homepage = true))
+LEFT JOIN %s ps ON ps.funnel_id = sf.id AND ps.slug = sf.slug || '--' || COALESCE(sp.slug, $2)
 WHERE lower(pd.domain) = lower($1)
    OR lower(sf.domain) = lower($1)
    OR lower(ps.custom_domain) = lower($1)

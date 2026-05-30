@@ -260,11 +260,39 @@ For a custom domain to serve, PostgreSQL must contain matching rows:
 - `platform_domains.purpose` must be `funnel` or `NULL`.
 - `site_funnels.platform_domain_id` must point to the `platform_domains.id`.
 - `site_funnels.status` must be `published`.
+- `site_pages` should contain the requested page slug, or a homepage row for `/`.
 - `published_sites.slug` must equal `site_funnels.slug || '--' || page_slug`.
 - `published_sites.html_content` must not be `NULL`.
 - The tables must be in `DB_SITES_SCHEMA`, default `public`.
 
 Homepage requests use page slug `index`.
+
+Useful checks:
+
+```sql
+SELECT id, name, slug, status, platform_domain_id
+FROM site_funnels
+WHERE platform_domain_id = (
+  SELECT id
+  FROM platform_domains
+  WHERE lower(domain) = lower('site.mylb.online')
+);
+```
+
+```sql
+SELECT
+  id,
+  slug,
+  name,
+  funnel_id,
+  is_homepage,
+  status,
+  LENGTH(html_content) AS html_size,
+  updated_at
+FROM site_pages
+WHERE funnel_id = '<funnel-id>'
+ORDER BY updated_at DESC;
+```
 
 ## 9. Verify Deployment
 

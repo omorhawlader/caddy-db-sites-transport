@@ -109,7 +109,7 @@ The handler logs every request step with Caddy structured logs:
 - cache hit/miss and positive/negative cache writes
 - PostgreSQL database, configured schema, current schema, and search path at startup
 - published HTML lookup inputs and row result
-- 404 diagnostics showing matching domain, funnel, expected published slug, actual published row, and HTML size when available
+- 404 diagnostics showing matching domain, funnel, matching `site_pages` row, expected published slug, actual published row, and HTML size when available
 - final response status for missing, forbidden, locked, or served HTML responses
 
 For troubleshooting 404s on EC2:
