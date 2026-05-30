@@ -258,7 +258,7 @@ For a custom domain to serve, PostgreSQL must contain matching rows:
 - `platform_domains.domain` must match the request host.
 - `platform_domains.status` must be `verified`.
 - `platform_domains.purpose` must be `funnel` or `NULL`.
-- `site_funnels.domain_id` must point to the `platform_domains.id`.
+- `site_funnels.platform_domain_id` must point to the `platform_domains.id`.
 - `site_funnels.status` must be `published`.
 - `published_sites.slug` must equal `site_funnels.slug || '--' || page_slug`.
 - `published_sites.html_content` must not be `NULL`.

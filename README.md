@@ -9,7 +9,7 @@ The handler resolves an incoming custom domain request to a row in `published_si
 - Custom domain: `https://example.com/about`
   - Requires `platform_domains.status = 'verified'`
   - Requires `platform_domains.purpose = 'funnel'` or `NULL`
-  - Uses `site_funnels.domain_id -> platform_domains.id`
+  - Uses `site_funnels.platform_domain_id -> platform_domains.id`
 
 Root/homepage requests use page slug `index`, so `https://example.com/` resolves to the published row for that domain and `sf.slug || '--index'`.
 
@@ -93,7 +93,7 @@ published_sites.slug = site_funnels.slug || '--' || '{page-slug}'
 Custom domain routing validates the domain via:
 
 ```sql
-site_funnels.domain_id = platform_domains.id
+site_funnels.platform_domain_id = platform_domains.id
 platform_domains.status = 'verified'
 platform_domains.purpose IN ('funnel', NULL)
 ```

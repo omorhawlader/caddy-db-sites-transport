@@ -582,7 +582,7 @@ SELECT
 	ps.updated_at
 FROM %s ps
 JOIN %s sf ON sf.id = ps.funnel_id
-JOIN %s pd ON pd.id = sf.domain_id
+JOIN %s pd ON pd.id = sf.platform_domain_id
 WHERE (lower(pd.domain) = lower($1) OR lower(ps.custom_domain) = lower($1) OR lower(sf.domain) = lower($1))
   AND pd.status = 'verified'
   AND (pd.purpose = 'funnel' OR pd.purpose IS NULL)
@@ -597,7 +597,7 @@ SELECT
 	COALESCE(pd.purpose, ''),
 	sf.status
 FROM %s pd
-LEFT JOIN %s sf ON sf.domain_id = pd.id
+LEFT JOIN %s sf ON sf.platform_domain_id = pd.id
 WHERE lower(pd.domain) = lower($1)
 LIMIT 1`
 
@@ -615,7 +615,7 @@ SELECT
 	ps.custom_domain,
 	LENGTH(ps.html_content)
 FROM %s pd
-LEFT JOIN %s sf ON sf.domain_id = pd.id
+LEFT JOIN %s sf ON sf.platform_domain_id = pd.id
 LEFT JOIN %s ps ON ps.funnel_id = sf.id AND ps.slug = sf.slug || '--' || $2
 WHERE lower(pd.domain) = lower($1)
    OR lower(sf.domain) = lower($1)
