@@ -49,8 +49,8 @@ func resolveTarget(host, requestPath string) routeTarget {
 	}
 }
 
-func normalizeCustomDomainPageSlug(urlPath string, funnelSlug string) string {
-	p := strings.Trim(urlPath, "/")
+func normalizeCustomDomainFunnelPageSlug(requestPath string, funnelSlug string) string {
+	p := strings.Trim(requestPath, "/")
 
 	if p == "" {
 		return "home"

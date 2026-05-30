@@ -52,6 +52,8 @@ type publishedSite struct {
 	Title       string
 	HTML        string
 	Slug        string
+	PageSlug    string
+	FunnelSlug  string
 	FunnelType  string
 	UpdatedAt   time.Time
 	CacheETag   string
@@ -228,7 +230,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if !found {
 		h.logger.Info("db_sites request completed: no published html",
 			zap.String("host", host),
-			zap.String("page_slug", target.PageSlug),
+			zap.String("raw_page_slug", target.PageSlug),
 			zap.Int("status", code),
 			zap.Duration("duration", time.Since(start)),
 		)
@@ -241,7 +243,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	}
 	h.logger.Info("db_sites request completed: serving html",
 		zap.String("host", host),
-		zap.String("page_slug", target.PageSlug),
+		zap.String("raw_page_slug", target.PageSlug),
+		zap.String("normalized_page_slug", site.PageSlug),
+		zap.String("funnel_slug", site.FunnelSlug),
 		zap.String("published_slug", site.Slug),
 		zap.String("title", site.Title),
 		zap.String("funnel_type", site.FunnelType),
@@ -256,6 +260,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 }
 
 func (h *Handler) lookupPublishedSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
+	if target.Kind == routeCustomDomain {
+		return h.lookupCustomDomainPublishedSite(ctx, target)
+	}
+
 	key := cacheKey(target)
 	if site, found, hit, code := h.cache.get(key); hit {
 		h.logger.Info("db_sites cache hit",
@@ -303,47 +311,103 @@ func (h *Handler) lookupPublishedSite(ctx context.Context, target routeTarget) (
 
 func (h *Handler) queryPublishedSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
 	switch target.Kind {
-	case routeCustomDomain:
-		return h.queryCustomDomainPublishedSite(ctx, target)
 	default:
 		return nil, false, http.StatusNotFound, fmt.Errorf("unknown route kind %q", target.Kind)
 	}
 }
 
-func (h *Handler) queryCustomDomainPublishedSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
+func (h *Handler) lookupCustomDomainPublishedSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
 	funnel, found, code, err := h.lookupCustomDomainFunnel(ctx, target)
 	if err != nil || !found {
 		return nil, false, code, err
 	}
 
-	normalizedPageSlug := normalizeCustomDomainPageSlug(target.RequestPath, funnel.Slug)
-	publishedSlug := funnel.Slug + "--" + normalizedPageSlug
+	rawPageSlug := target.PageSlug
+	normalizedTarget := target
+	normalizedTarget.PageSlug = normalizeCustomDomainFunnelPageSlug(target.RequestPath, funnel.Slug)
+	publishedSlug := funnel.Slug + "--" + normalizedTarget.PageSlug
 
 	h.logger.Info("db_sites custom domain path normalized",
 		zap.String("host", target.Host),
-		zap.String("request_path", target.RequestPath),
-		zap.String("raw_page_slug", target.PageSlug),
+		zap.String("original_path", target.RequestPath),
+		zap.String("raw_page_slug", rawPageSlug),
 		zap.String("funnel_slug", funnel.Slug),
-		zap.String("normalized_page_slug", normalizedPageSlug),
+		zap.String("normalized_page_slug", normalizedTarget.PageSlug),
 		zap.String("expected_published_slug", publishedSlug),
 	)
 
+	key := cacheKey(normalizedTarget)
+	if site, found, hit, code := h.cache.get(key); hit {
+		h.logger.Info("db_sites cache hit",
+			zap.String("cache_key", key),
+			zap.Bool("found", found),
+			zap.Int("cached_status", code),
+			zap.String("host", normalizedTarget.Host),
+			zap.String("original_path", target.RequestPath),
+			zap.String("raw_page_slug", rawPageSlug),
+			zap.String("normalized_page_slug", normalizedTarget.PageSlug),
+			zap.String("funnel_slug", funnel.Slug),
+		)
+		return site, found, code, nil
+	}
+	h.logger.Info("db_sites cache miss",
+		zap.String("cache_key", key),
+		zap.String("host", normalizedTarget.Host),
+		zap.String("original_path", target.RequestPath),
+		zap.String("raw_page_slug", rawPageSlug),
+		zap.String("normalized_page_slug", normalizedTarget.PageSlug),
+		zap.String("funnel_slug", funnel.Slug),
+	)
+
+	site, found, code, err := h.queryCustomDomainPublishedPage(ctx, normalizedTarget, funnel, rawPageSlug, publishedSlug)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	if found {
+		ttl := resolveTTL(time.Duration(h.CacheTTL))
+		h.cache.set(key, site, true, ttl, http.StatusOK)
+		h.logger.Info("db_sites cache store positive",
+			zap.String("cache_key", key),
+			zap.Duration("ttl", ttl),
+			zap.String("published_slug", site.Slug),
+			zap.String("normalized_page_slug", normalizedTarget.PageSlug),
+			zap.String("funnel_slug", funnel.Slug),
+		)
+		return site, true, http.StatusOK, nil
+	}
+
+	ttl := time.Duration(h.NegCacheTTL)
+	if ttl <= 0 {
+		ttl = resolveTTL(time.Duration(h.CacheTTL))
+	}
+	h.cache.set(key, nil, false, ttl, code)
+	h.logger.Info("db_sites cache store negative",
+		zap.String("cache_key", key),
+		zap.Duration("ttl", ttl),
+		zap.Int("status", code),
+		zap.String("normalized_page_slug", normalizedTarget.PageSlug),
+		zap.String("funnel_slug", funnel.Slug),
+	)
+	return nil, false, code, nil
+}
+
+func (h *Handler) queryCustomDomainPublishedPage(ctx context.Context, target routeTarget, funnel customDomainFunnel, rawPageSlug, publishedSlug string) (*publishedSite, bool, int, error) {
 	var site publishedSite
 	site.ResolvedVia = target.Kind
+	site.PageSlug = target.PageSlug
+	site.FunnelSlug = funnel.Slug
 	row := h.pool.QueryRow(ctx, h.customDomainPublishedPageQuery, funnel.ID, publishedSlug)
 	if err := row.Scan(&site.Slug, &site.Title, &site.FunnelType, &site.HTML, &site.UpdatedAt); err != nil {
 		if err == pgx.ErrNoRows {
 			h.logger.Info("db_sites published html query returned no rows",
 				zap.String("host", target.Host),
 				zap.String("request_path", target.RequestPath),
-				zap.String("raw_page_slug", target.PageSlug),
-				zap.String("normalized_page_slug", normalizedPageSlug),
+				zap.String("raw_page_slug", rawPageSlug),
+				zap.String("normalized_page_slug", target.PageSlug),
 				zap.String("funnel_slug", funnel.Slug),
 				zap.String("expected_published_slug", publishedSlug),
 			)
-			diagTarget := target
-			diagTarget.PageSlug = normalizedPageSlug
-			h.logDomainDiagnostics(ctx, diagTarget)
+			h.logDomainDiagnostics(ctx, target)
 			return nil, false, http.StatusNotFound, nil
 		}
 		return nil, false, 0, fmt.Errorf("query published site: %w", err)
@@ -352,8 +416,8 @@ func (h *Handler) queryCustomDomainPublishedSite(ctx context.Context, target rou
 	h.logger.Info("db_sites published html row found",
 		zap.String("host", target.Host),
 		zap.String("request_path", target.RequestPath),
-		zap.String("raw_page_slug", target.PageSlug),
-		zap.String("normalized_page_slug", normalizedPageSlug),
+		zap.String("raw_page_slug", rawPageSlug),
+		zap.String("normalized_page_slug", target.PageSlug),
 		zap.String("funnel_slug", funnel.Slug),
 		zap.String("published_slug", site.Slug),
 		zap.Int("html_bytes", len(site.HTML)),

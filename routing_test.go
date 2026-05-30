@@ -16,7 +16,7 @@ func TestResolveTargetCustomDomainPage(t *testing.T) {
 	}
 }
 
-func TestNormalizeCustomDomainPageSlug(t *testing.T) {
+func TestNormalizeCustomDomainFunnelPageSlug(t *testing.T) {
 	tests := map[string]string{
 		"/":                           "home",
 		"/home":                       "home",
@@ -28,9 +28,9 @@ func TestNormalizeCustomDomainPageSlug(t *testing.T) {
 		"test-funnel-domain/services": "services",
 	}
 	for input, want := range tests {
-		got := normalizeCustomDomainPageSlug(input, "test-funnel-domain")
+		got := normalizeCustomDomainFunnelPageSlug(input, "test-funnel-domain")
 		if got != want {
-			t.Fatalf("normalizeCustomDomainPageSlug(%q) = %q, want %q", input, got, want)
+			t.Fatalf("normalizeCustomDomainFunnelPageSlug(%q) = %q, want %q", input, got, want)
 		}
 	}
 }
