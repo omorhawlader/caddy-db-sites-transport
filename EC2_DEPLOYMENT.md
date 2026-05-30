@@ -115,12 +115,13 @@ Create `/etc/caddy/db-sites.env`:
 ```bash
 sudo tee /etc/caddy/db-sites.env >/dev/null <<'EOF'
 DB_SITES_DATABASE_URL=postgres://USER:PASSWORD@DB_HOST:5432/DB_NAME?sslmode=require
+DB_SITES_SCHEMA=public
 DB_SITES_CACHE_TTL=30m
 DB_SITES_NEGATIVE_CACHE_TTL=2m
 DB_SITES_CACHE_CONTROL=public, max-age=60
 EOF
 
-sudo chmod 600 /etc/caddy/db-sites.env
+sudo chmod 640 /etc/caddy/db-sites.env
 sudo chown root:caddy /etc/caddy/db-sites.env
 ```
 
@@ -131,6 +132,7 @@ Verify PostgreSQL connectivity from the EC2 instance:
 ```bash
 source /etc/caddy/db-sites.env
 psql "$DB_SITES_DATABASE_URL" -c "select now();"
+psql "$DB_SITES_DATABASE_URL" -c "select current_database(), current_schema(), current_setting('search_path');"
 ```
 
 ## 6. Configure Caddy
@@ -186,9 +188,9 @@ https:// {
 
 	header Cache-Control "public, max-age=0, must-revalidate"
 
-	handle {
-		db_sites
-	}
+handle {
+	db_sites
+}
 }
 EOF
 
@@ -198,6 +200,12 @@ sudo caddy fmt --overwrite /etc/caddy/Caddyfile
 This replaces the previous S3 website `reverse_proxy`/`transport aws` blocks. S3 remains only for certificate storage through `storage s3`; page HTML is served by `db_sites` from the database.
 
 Replace `ZERO_SSL_EAB_KEY_ID`, `ZERO_SSL_EAB_MAC_KEY`, and `<your-caddy-s3-storage-module>` with your real production values. Do not commit those secrets to this repository.
+
+The `db_sites` handler logs each request step, including host normalization, page slug resolution, cache state, SQL lookup status, and detailed 404 diagnostics. Watch logs while testing a domain:
+
+```bash
+sudo journalctl -u caddy -f
+```
 
 ## 7. Configure Systemd
 
@@ -254,6 +262,7 @@ For a custom domain to serve, PostgreSQL must contain matching rows:
 - `site_funnels.status` must be `published`.
 - `published_sites.slug` must equal `site_funnels.slug || '--' || page_slug`.
 - `published_sites.html_content` must not be `NULL`.
+- The tables must be in `DB_SITES_SCHEMA`, default `public`.
 
 Homepage requests use page slug `index`.
 

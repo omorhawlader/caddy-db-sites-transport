@@ -60,6 +60,7 @@ caddy list-modules | grep db_sites
 	route {
 		db_sites {
 			database_url "postgres://user:pass@db.example.com:5432/sitebuilder"
+			schema public
 			cache_ttl 30m
 			negative_cache_ttl 2m
 			cache_control "public, max-age=60"
@@ -73,6 +74,7 @@ caddy list-modules | grep db_sites
 | Variable | Description |
 |---|---|
 | `DB_SITES_DATABASE_URL` | PostgreSQL connection URL |
+| `DB_SITES_SCHEMA` | PostgreSQL schema containing `published_sites`, `site_funnels`, and `platform_domains`. Default: `public` |
 | `DB_SITES_CACHE_TTL` | Positive cache TTL, default `30m` |
 | `DB_SITES_NEGATIVE_CACHE_TTL` | Not-found cache TTL, default same as positive TTL |
 | `DB_SITES_CACHE_CLEAR_PATH` | Cache clear endpoint, default `/db-sites/cache/clear` |
@@ -97,6 +99,24 @@ platform_domains.purpose IN ('funnel', NULL)
 ```
 
 Only `site_funnels.status = 'published'` and non-null published HTML are served.
+
+## Logging
+
+The handler logs every request step with Caddy structured logs:
+
+- incoming method, host, normalized host, path, forwarded headers, and user agent
+- resolved route kind and page slug
+- cache hit/miss and positive/negative cache writes
+- PostgreSQL database, configured schema, current schema, and search path at startup
+- published HTML lookup inputs and row result
+- 404 diagnostics showing matching domain, funnel, expected published slug, actual published row, and HTML size when available
+- final response status for missing, forbidden, locked, or served HTML responses
+
+For troubleshooting 404s on EC2:
+
+```bash
+sudo journalctl -u caddy -f
+```
 
 ## Operational endpoint
 

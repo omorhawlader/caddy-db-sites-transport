@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,8 +27,11 @@ func init() {
 
 const defaultCacheClearPath = "/db-sites/cache/clear"
 
+var safeIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
 type Handler struct {
 	DatabaseURL string `json:"database_url,omitempty"`
+	Schema      string `json:"schema,omitempty"`
 
 	CacheTTL    caddy.Duration `json:"cache_ttl,omitempty"`
 	NegCacheTTL caddy.Duration `json:"negative_cache_ttl,omitempty"`
@@ -38,6 +42,9 @@ type Handler struct {
 	pool   *pgxpool.Pool
 	cache  *responseCache
 	logger *zap.Logger
+
+	customDomainQuery       string
+	customDomainStatusQuery string
 }
 
 type publishedSite struct {
@@ -66,8 +73,27 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.CacheClearPath == "" {
 		h.CacheClearPath = defaultCacheClearPath
 	}
+	if h.Schema == "" {
+		h.Schema = "public"
+	}
+	if !safeIdentifier.MatchString(h.Schema) {
+		return fmt.Errorf("db_sites: invalid schema %q (must match %s)", h.Schema, safeIdentifier.String())
+	}
+	h.customDomainQuery = fmt.Sprintf(customDomainSQLTemplate, qualifiedTable(h.Schema, "published_sites"), qualifiedTable(h.Schema, "site_funnels"), qualifiedTable(h.Schema, "platform_domains"))
+	h.customDomainStatusQuery = fmt.Sprintf(customDomainStatusSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"))
 
-	pool, err := pgxpool.New(context.Background(), h.DatabaseURL)
+	cfg, err := pgxpool.ParseConfig(h.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("db_sites: parse database_url: %w", err)
+	}
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	if _, ok := cfg.ConnConfig.RuntimeParams["search_path"]; !ok {
+		cfg.ConnConfig.RuntimeParams["search_path"] = h.Schema
+	}
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		return fmt.Errorf("db_sites: connect to database: %w", err)
 	}
@@ -77,9 +103,21 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	h.pool = pool
 	h.cache = newResponseCache()
+	h.logDatabaseMetadata(context.Background())
 	h.logger.Info("db_sites provisioned",
 		zap.String("database_url", redactDatabaseURL(h.DatabaseURL)),
+		zap.String("database_host", cfg.ConnConfig.Host),
+		zap.Uint16("database_port", cfg.ConnConfig.Port),
+		zap.String("database_name", cfg.ConnConfig.Database),
+		zap.String("database_user", cfg.ConnConfig.User),
+		zap.String("schema", h.Schema),
+		zap.String("search_path", cfg.ConnConfig.RuntimeParams["search_path"]),
+		zap.Int32("pool_max_conns", cfg.MaxConns),
+		zap.Int32("pool_min_conns", cfg.MinConns),
 		zap.Duration("cache_ttl", time.Duration(h.CacheTTL)),
+		zap.Duration("negative_cache_ttl", time.Duration(h.NegCacheTTL)),
+		zap.String("cache_clear_path", h.CacheClearPath),
+		zap.String("cache_control", h.CacheControl),
 	)
 	return nil
 }
@@ -91,6 +129,7 @@ func (h *Handler) loadEnvDefaults() {
 		}
 	}
 	envOr(&h.DatabaseURL, "DB_SITES_DATABASE_URL")
+	envOr(&h.Schema, "DB_SITES_SCHEMA")
 	envOr(&h.CacheClearPath, "DB_SITES_CACHE_CLEAR_PATH")
 	envOr(&h.CacheControl, "DB_SITES_CACHE_CONTROL")
 
@@ -125,29 +164,82 @@ func (h *Handler) Cleanup() error {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	start := time.Now()
 	host := effectiveRequestHost(r)
+	h.logger.Info("db_sites request received",
+		zap.String("method", r.Method),
+		zap.String("raw_host", r.Host),
+		zap.String("effective_host", host),
+		zap.String("path", r.URL.Path),
+		zap.String("query", r.URL.RawQuery),
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("user_agent", r.UserAgent()),
+		zap.String("x_forwarded_host", r.Header.Get("X-Forwarded-Host")),
+		zap.String("x_forwarded_for", r.Header.Get("X-Forwarded-For")),
+		zap.String("accept", r.Header.Get("Accept")),
+	)
 	if host == "" {
+		h.logger.Warn("db_sites request rejected: missing host", zap.Duration("duration", time.Since(start)))
 		return caddyhttp.Error(http.StatusBadRequest, fmt.Errorf("missing Host header"))
 	}
 	if strings.EqualFold(pathClean(r.URL.Path), pathClean(h.CacheClearPath)) {
+		h.logger.Info("db_sites cache clear requested", zap.String("host", host), zap.String("path", r.URL.Path))
 		return h.serveCacheClear(w, r)
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
+		h.logger.Warn("db_sites request rejected: method not allowed",
+			zap.String("method", r.Method),
+			zap.String("host", host),
+			zap.Duration("duration", time.Since(start)),
+		)
 		return caddyhttp.Error(http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
 	}
 
 	target := resolveTarget(host, r.URL.Path)
+	h.logger.Info("db_sites route resolved",
+		zap.String("host", host),
+		zap.String("route_kind", string(target.Kind)),
+		zap.String("page_slug", target.PageSlug),
+		zap.String("schema", h.Schema),
+	)
 
 	site, found, code, err := h.lookupPublishedSite(r.Context(), target)
 	if err != nil {
-		h.logger.Error("published site lookup failed", zap.String("host", host), zap.Error(err))
+		h.logger.Error("db_sites request failed: published site lookup error",
+			zap.String("host", host),
+			zap.String("page_slug", target.PageSlug),
+			zap.Duration("duration", time.Since(start)),
+			zap.Error(err),
+		)
 		return caddyhttp.Error(http.StatusBadGateway, err)
 	}
 	if !found {
+		h.logger.Info("db_sites request completed: no published html",
+			zap.String("host", host),
+			zap.String("page_slug", target.PageSlug),
+			zap.Int("status", code),
+			zap.Duration("duration", time.Since(start)),
+		)
 		return caddyhttp.Error(code, fmt.Errorf(http.StatusText(code)))
 	}
 
+	status := http.StatusOK
+	if etagMatches(r, site.CacheETag) {
+		status = http.StatusNotModified
+	}
+	h.logger.Info("db_sites request completed: serving html",
+		zap.String("host", host),
+		zap.String("page_slug", target.PageSlug),
+		zap.String("published_slug", site.Slug),
+		zap.String("title", site.Title),
+		zap.String("funnel_type", site.FunnelType),
+		zap.Time("published_updated_at", site.UpdatedAt),
+		zap.Int("html_bytes", len(site.HTML)),
+		zap.String("etag", site.CacheETag),
+		zap.Int("status", status),
+		zap.Duration("duration", time.Since(start)),
+	)
 	writeHTML(w, r, site, h.CacheControl)
 	return nil
 }
@@ -155,15 +247,33 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 func (h *Handler) lookupPublishedSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
 	key := cacheKey(target)
 	if site, found, hit, code := h.cache.get(key); hit {
+		h.logger.Info("db_sites cache hit",
+			zap.String("cache_key", key),
+			zap.Bool("found", found),
+			zap.Int("cached_status", code),
+			zap.String("host", target.Host),
+			zap.String("page_slug", target.PageSlug),
+		)
 		return site, found, code, nil
 	}
+	h.logger.Info("db_sites cache miss",
+		zap.String("cache_key", key),
+		zap.String("host", target.Host),
+		zap.String("page_slug", target.PageSlug),
+	)
 
 	site, found, code, err := h.queryPublishedSite(ctx, target)
 	if err != nil {
 		return nil, false, 0, err
 	}
 	if found {
-		h.cache.set(key, site, true, resolveTTL(time.Duration(h.CacheTTL)), http.StatusOK)
+		ttl := resolveTTL(time.Duration(h.CacheTTL))
+		h.cache.set(key, site, true, ttl, http.StatusOK)
+		h.logger.Info("db_sites cache store positive",
+			zap.String("cache_key", key),
+			zap.Duration("ttl", ttl),
+			zap.String("published_slug", site.Slug),
+		)
 		return site, true, http.StatusOK, nil
 	}
 
@@ -172,6 +282,11 @@ func (h *Handler) lookupPublishedSite(ctx context.Context, target routeTarget) (
 		ttl = resolveTTL(time.Duration(h.CacheTTL))
 	}
 	h.cache.set(key, nil, false, ttl, code)
+	h.logger.Info("db_sites cache store negative",
+		zap.String("cache_key", key),
+		zap.Duration("ttl", ttl),
+		zap.Int("status", code),
+	)
 	return nil, false, code, nil
 }
 
@@ -179,7 +294,13 @@ func (h *Handler) queryPublishedSite(ctx context.Context, target routeTarget) (*
 	var row pgx.Row
 	switch target.Kind {
 	case routeCustomDomain:
-		row = h.pool.QueryRow(ctx, customDomainSQL, target.Host, target.PageSlug)
+		h.logger.Info("db_sites query published html",
+			zap.String("schema", h.Schema),
+			zap.String("host", target.Host),
+			zap.String("page_slug", target.PageSlug),
+			zap.String("expected_slug_expression", "site_funnels.slug || '--' || page_slug"),
+		)
+		row = h.pool.QueryRow(ctx, h.customDomainQuery, target.Host, target.PageSlug)
 	default:
 		return nil, false, http.StatusNotFound, fmt.Errorf("unknown route kind %q", target.Kind)
 	}
@@ -188,12 +309,24 @@ func (h *Handler) queryPublishedSite(ctx context.Context, target routeTarget) (*
 	site.ResolvedVia = target.Kind
 	if err := row.Scan(&site.Slug, &site.Title, &site.FunnelType, &site.HTML, &site.UpdatedAt); err != nil {
 		if err == pgx.ErrNoRows {
+			h.logger.Info("db_sites published html query returned no rows",
+				zap.String("host", target.Host),
+				zap.String("page_slug", target.PageSlug),
+			)
+			h.logDomainDiagnostics(ctx, target)
 			code, err := h.notFoundStatus(ctx, target)
 			return nil, false, code, err
 		}
 		return nil, false, 0, fmt.Errorf("query published site: %w", err)
 	}
 	site.CacheETag = weakETag(site.HTML)
+	h.logger.Info("db_sites published html row found",
+		zap.String("host", target.Host),
+		zap.String("page_slug", target.PageSlug),
+		zap.String("published_slug", site.Slug),
+		zap.Int("html_bytes", len(site.HTML)),
+		zap.Time("updated_at", site.UpdatedAt),
+	)
 	return &site, true, http.StatusOK, nil
 }
 
@@ -207,19 +340,45 @@ func (h *Handler) notFoundStatus(ctx context.Context, target routeTarget) (int, 
 func (h *Handler) customDomainMissStatus(ctx context.Context, host string) (int, error) {
 	var domainStatus, purpose string
 	var siteStatus sql.NullString
-	err := h.pool.QueryRow(ctx, customDomainStatusSQL, host).Scan(&domainStatus, &purpose, &siteStatus)
+	h.logger.Info("db_sites checking custom domain miss status",
+		zap.String("host", host),
+		zap.String("schema", h.Schema),
+	)
+	err := h.pool.QueryRow(ctx, h.customDomainStatusQuery, host).Scan(&domainStatus, &purpose, &siteStatus)
 	if err == pgx.ErrNoRows {
+		h.logger.Info("db_sites custom domain status: domain not registered",
+			zap.String("host", host),
+			zap.Int("status", http.StatusNotFound),
+		)
 		return http.StatusNotFound, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("query custom domain status: %w", err)
 	}
 	if domainStatus != "verified" || (purpose != "" && purpose != "funnel") {
+		h.logger.Info("db_sites custom domain status: forbidden",
+			zap.String("host", host),
+			zap.String("domain_status", domainStatus),
+			zap.String("purpose", purpose),
+			zap.Int("status", http.StatusForbidden),
+		)
 		return http.StatusForbidden, nil
 	}
 	if siteStatus.Valid && siteStatus.String != "published" {
+		h.logger.Info("db_sites custom domain status: site locked",
+			zap.String("host", host),
+			zap.String("site_status", siteStatus.String),
+			zap.Int("status", http.StatusLocked),
+		)
 		return http.StatusLocked, nil
 	}
+	h.logger.Info("db_sites custom domain status: domain valid but page/html missing",
+		zap.String("host", host),
+		zap.String("domain_status", domainStatus),
+		zap.String("purpose", purpose),
+		zap.String("site_status", nullStringValue(siteStatus)),
+		zap.Int("status", http.StatusNotFound),
+	)
 	return http.StatusNotFound, nil
 }
 
@@ -231,6 +390,11 @@ func (h *Handler) serveCacheClear(w http.ResponseWriter, r *http.Request) error 
 		return caddyhttp.Error(http.StatusMethodNotAllowed, fmt.Errorf("method not allowed"))
 	}
 	removed := h.cache.invalidateAll()
+	h.logger.Info("db_sites cache cleared",
+		zap.Int("removed_entries", removed),
+		zap.String("method", r.Method),
+		zap.String("path", r.URL.Path),
+	)
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return nil
@@ -253,7 +417,7 @@ func writeHTML(w http.ResponseWriter, r *http.Request, site *publishedSite, cach
 	if cacheControl != "" {
 		h.Set("Cache-Control", cacheControl)
 	}
-	if match := r.Header.Get("If-None-Match"); match != "" && match == site.CacheETag {
+	if etagMatches(r, site.CacheETag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -261,6 +425,10 @@ func writeHTML(w http.ResponseWriter, r *http.Request, site *publishedSite, cach
 	if r.Method != http.MethodHead {
 		_, _ = w.Write([]byte(site.HTML))
 	}
+}
+
+func etagMatches(r *http.Request, etag string) bool {
+	return r.Header.Get("If-None-Match") == etag
 }
 
 func cacheKey(target routeTarget) string {
@@ -287,16 +455,134 @@ func pathClean(p string) string {
 	return "/" + strings.TrimPrefix(strings.TrimSuffix(p, "/"), "/")
 }
 
-const customDomainSQL = `
+func qualifiedTable(schema, table string) string {
+	return quoteIdent(schema) + "." + quoteIdent(table)
+}
+
+func quoteIdent(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
+func nullStringValue(v sql.NullString) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.String
+}
+
+func (h *Handler) logDatabaseMetadata(ctx context.Context) {
+	var dbName, currentSchema, searchPath, version string
+	err := h.pool.QueryRow(ctx, `SELECT current_database(), current_schema(), current_setting('search_path'), version()`).Scan(&dbName, &currentSchema, &searchPath, &version)
+	if err != nil {
+		h.logger.Warn("db_sites database metadata query failed", zap.Error(err))
+		return
+	}
+	h.logger.Info("db_sites database connected",
+		zap.String("database", dbName),
+		zap.String("configured_schema", h.Schema),
+		zap.String("current_schema", currentSchema),
+		zap.String("search_path", searchPath),
+		zap.String("postgres_version", version),
+	)
+}
+
+func (h *Handler) logDomainDiagnostics(ctx context.Context, target routeTarget) {
+	rows, err := h.pool.Query(ctx, fmt.Sprintf(domainDiagnosticsSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"), qualifiedTable(h.Schema, "published_sites")), target.Host, target.PageSlug)
+	if err != nil {
+		h.logger.Warn("db_sites 404 diagnostics query failed",
+			zap.String("host", target.Host),
+			zap.String("page_slug", target.PageSlug),
+			zap.Error(err),
+		)
+		return
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		count++
+		var d domainDiagnostic
+		if err := rows.Scan(
+			&d.PlatformDomain,
+			&d.PlatformDomainStatus,
+			&d.PlatformDomainPurpose,
+			&d.FunnelID,
+			&d.FunnelSlug,
+			&d.FunnelStatus,
+			&d.FunnelDomain,
+			&d.ExpectedPublishedSlug,
+			&d.PublishedSlug,
+			&d.PublishedCustomDomain,
+			&d.HTMLBytes,
+		); err != nil {
+			h.logger.Warn("db_sites 404 diagnostics scan failed",
+				zap.String("host", target.Host),
+				zap.Error(err),
+			)
+			return
+		}
+		h.logger.Info("db_sites 404 diagnostics candidate",
+			zap.String("host", target.Host),
+			zap.String("page_slug", target.PageSlug),
+			zap.String("platform_domain", nullStringValue(d.PlatformDomain)),
+			zap.String("platform_domain_status", nullStringValue(d.PlatformDomainStatus)),
+			zap.String("platform_domain_purpose", nullStringValue(d.PlatformDomainPurpose)),
+			zap.String("funnel_id", nullStringValue(d.FunnelID)),
+			zap.String("funnel_slug", nullStringValue(d.FunnelSlug)),
+			zap.String("funnel_status", nullStringValue(d.FunnelStatus)),
+			zap.String("funnel_domain", nullStringValue(d.FunnelDomain)),
+			zap.String("expected_published_slug", nullStringValue(d.ExpectedPublishedSlug)),
+			zap.String("published_slug", nullStringValue(d.PublishedSlug)),
+			zap.String("published_custom_domain", nullStringValue(d.PublishedCustomDomain)),
+			zap.Int64("html_bytes", nullInt64Value(d.HTMLBytes)),
+		)
+	}
+	if err := rows.Err(); err != nil {
+		h.logger.Warn("db_sites 404 diagnostics rows failed",
+			zap.String("host", target.Host),
+			zap.Error(err),
+		)
+		return
+	}
+	if count == 0 {
+		h.logger.Info("db_sites 404 diagnostics found no platform_domain/site candidates",
+			zap.String("host", target.Host),
+			zap.String("page_slug", target.PageSlug),
+		)
+	}
+}
+
+func nullInt64Value(v sql.NullInt64) int64 {
+	if !v.Valid {
+		return 0
+	}
+	return v.Int64
+}
+
+type domainDiagnostic struct {
+	PlatformDomain        sql.NullString
+	PlatformDomainStatus  sql.NullString
+	PlatformDomainPurpose sql.NullString
+	FunnelID              sql.NullString
+	FunnelSlug            sql.NullString
+	FunnelStatus          sql.NullString
+	FunnelDomain          sql.NullString
+	ExpectedPublishedSlug sql.NullString
+	PublishedSlug         sql.NullString
+	PublishedCustomDomain sql.NullString
+	HTMLBytes             sql.NullInt64
+}
+
+const customDomainSQLTemplate = `
 SELECT
 	ps.slug,
 	COALESCE(ps.title, ''),
 	COALESCE(ps.funnel_type, ''),
 	ps.html_content,
 	ps.updated_at
-FROM published_sites ps
-JOIN site_funnels sf ON sf.id = ps.funnel_id
-JOIN platform_domains pd ON pd.id = sf.domain_id
+FROM %s ps
+JOIN %s sf ON sf.id = ps.funnel_id
+JOIN %s pd ON pd.id = sf.domain_id
 WHERE (lower(pd.domain) = lower($1) OR lower(ps.custom_domain) = lower($1) OR lower(sf.domain) = lower($1))
   AND pd.status = 'verified'
   AND (pd.purpose = 'funnel' OR pd.purpose IS NULL)
@@ -305,15 +591,36 @@ WHERE (lower(pd.domain) = lower($1) OR lower(ps.custom_domain) = lower($1) OR lo
   AND ps.html_content IS NOT NULL
 LIMIT 1`
 
-const customDomainStatusSQL = `
+const customDomainStatusSQLTemplate = `
 SELECT
 	pd.status,
 	COALESCE(pd.purpose, ''),
 	sf.status
-FROM platform_domains pd
-LEFT JOIN site_funnels sf ON sf.domain_id = pd.id
+FROM %s pd
+LEFT JOIN %s sf ON sf.domain_id = pd.id
 WHERE lower(pd.domain) = lower($1)
 LIMIT 1`
+
+const domainDiagnosticsSQLTemplate = `
+SELECT
+	pd.domain,
+	pd.status,
+	pd.purpose,
+	sf.id::text,
+	sf.slug,
+	sf.status,
+	sf.domain,
+	CASE WHEN sf.slug IS NULL THEN NULL ELSE sf.slug || '--' || $2 END AS expected_published_slug,
+	ps.slug,
+	ps.custom_domain,
+	LENGTH(ps.html_content)
+FROM %s pd
+LEFT JOIN %s sf ON sf.domain_id = pd.id
+LEFT JOIN %s ps ON ps.funnel_id = sf.id AND ps.slug = sf.slug || '--' || $2
+WHERE lower(pd.domain) = lower($1)
+   OR lower(sf.domain) = lower($1)
+   OR lower(ps.custom_domain) = lower($1)
+LIMIT 10`
 
 var (
 	_ caddy.Module                = (*Handler)(nil)

@@ -28,6 +28,11 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			h.DatabaseURL = d.Val()
+		case "schema":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			h.Schema = d.Val()
 		case "cache_ttl":
 			if !d.NextArg() {
 				return d.ArgErr()

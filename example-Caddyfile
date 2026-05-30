@@ -48,6 +48,7 @@ https:// {
 	handle {
 		db_sites {
 			database_url "postgres://user:pass@db.example.com:5432/sitebuilder?sslmode=require"
+			schema public
 			cache_ttl 30m
 			negative_cache_ttl 2m
 			cache_control "public, max-age=0, must-revalidate"
