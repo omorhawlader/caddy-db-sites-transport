@@ -814,36 +814,41 @@ WITH candidates AS (
 ),
 selected_funnel AS (
 	SELECT
-		candidates.*,
+		candidates.id AS funnel_id,
+		candidates.slug AS funnel_slug,
+		candidates.funnel_status AS funnel_status,
+		candidates.domain_status AS domain_status,
+		candidates.purpose AS purpose,
+		candidates.funnel_slug_matched AS funnel_slug_matched,
 		CASE
-			WHEN funnel_slug_matched THEN NULLIF($3, '')
+			WHEN candidates.funnel_slug_matched THEN NULLIF($3, '')
 			ELSE NULLIF($2, '')
 		END AS requested_page_slug,
 		CASE
-			WHEN funnel_slug_matched THEN 'funnel_slug_prefix'
+			WHEN candidates.funnel_slug_matched THEN 'funnel_slug_prefix'
 			ELSE 'domain_default'
 		END AS route_mode
 	FROM candidates
 	JOIN %s sp ON sp.funnel_id = candidates.id
 	WHERE (
 		CASE
-			WHEN funnel_slug_matched THEN NULLIF($3, '')
+			WHEN candidates.funnel_slug_matched THEN NULLIF($3, '')
 			ELSE NULLIF($2, '')
 		END IS NULL
 		AND sp.is_homepage = true
 	)
 	OR (
 		CASE
-			WHEN funnel_slug_matched THEN NULLIF($3, '')
+			WHEN candidates.funnel_slug_matched THEN NULLIF($3, '')
 			ELSE NULLIF($2, '')
 		END IS NOT NULL
 		AND sp.slug = CASE
-			WHEN funnel_slug_matched THEN NULLIF($3, '')
+			WHEN candidates.funnel_slug_matched THEN NULLIF($3, '')
 			ELSE NULLIF($2, '')
 		END
 	)
 	ORDER BY
-		CASE WHEN funnel_slug_matched THEN 0 ELSE 1 END,
+		CASE WHEN candidates.funnel_slug_matched THEN 0 ELSE 1 END,
 		CASE WHEN candidates.funnel_status = 'published' THEN 0 ELSE 1 END,
 		CASE WHEN sp.status = 'published' THEN 0 ELSE 1 END,
 		sp.is_homepage DESC,
@@ -853,8 +858,8 @@ selected_funnel AS (
 	LIMIT 1
 )
 SELECT
-	sf.id::text,
-	sf.slug,
+	sf.funnel_id::text,
+	sf.funnel_slug,
 	sf.funnel_status,
 	sf.domain_status,
 	sf.purpose,
@@ -866,7 +871,7 @@ SELECT
 	COALESCE(LENGTH(sp.html_content), 0),
 	sf.route_mode
 FROM selected_funnel sf
-JOIN %s sp ON sp.funnel_id = sf.id
+JOIN %s sp ON sp.funnel_id = sf.funnel_id
 WHERE (
 	sf.requested_page_slug IS NULL
 	AND sp.is_homepage = true
