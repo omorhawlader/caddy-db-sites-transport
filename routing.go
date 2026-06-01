@@ -72,6 +72,17 @@ func normalizeCustomDomainFunnelPageSlug(requestPath string, funnelSlug string) 
 	return p
 }
 
+func firstTwoPathSegments(requestPath string) (string, string) {
+	segments := pathSegments(path.Clean("/" + requestPath))
+	if len(segments) == 0 {
+		return "", ""
+	}
+	if len(segments) == 1 {
+		return segments[0], ""
+	}
+	return segments[0], segments[1]
+}
+
 func pathSegments(cleanPath string) []string {
 	parts := strings.Split(cleanPath, "/")
 	out := make([]string, 0, len(parts))

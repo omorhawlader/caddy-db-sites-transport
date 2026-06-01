@@ -43,7 +43,7 @@ type Handler struct {
 	cache  *responseCache
 	logger *zap.Logger
 
-	customDomainFunnelQuery        string
+	customDomainRouteQuery         string
 	customDomainPublishedPageQuery string
 	customDomainStatusQuery        string
 }
@@ -61,11 +61,20 @@ type publishedSite struct {
 }
 
 type customDomainFunnel struct {
-	ID           string
-	Slug         string
-	Status       string
-	DomainStatus string
-	Purpose      string
+	ID              string
+	Slug            string
+	Status          string
+	DomainStatus    string
+	Purpose         string
+	PageID          string
+	PageSlug        string
+	PageName        string
+	PageStatus      string
+	PageIsHomepage  bool
+	PageHTMLBytes   int64
+	RouteMode       string
+	RequestedFunnel string
+	RequestedPage   string
 }
 
 func (*Handler) CaddyModule() caddy.ModuleInfo {
@@ -90,7 +99,12 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if !safeIdentifier.MatchString(h.Schema) {
 		return fmt.Errorf("db_sites: invalid schema %q (must match %s)", h.Schema, safeIdentifier.String())
 	}
-	h.customDomainFunnelQuery = fmt.Sprintf(customDomainFunnelSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"))
+	h.customDomainRouteQuery = fmt.Sprintf(customDomainRouteSQLTemplate,
+		qualifiedTable(h.Schema, "platform_domains"),
+		qualifiedTable(h.Schema, "site_funnels"),
+		qualifiedTable(h.Schema, "site_pages"),
+		qualifiedTable(h.Schema, "site_pages"),
+	)
 	h.customDomainPublishedPageQuery = fmt.Sprintf(customDomainPublishedPageSQLTemplate, qualifiedTable(h.Schema, "published_sites"))
 	h.customDomainStatusQuery = fmt.Sprintf(customDomainStatusSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"))
 
@@ -324,7 +338,7 @@ func (h *Handler) lookupCustomDomainPublishedSite(ctx context.Context, target ro
 
 	rawPageSlug := target.PageSlug
 	normalizedTarget := target
-	normalizedTarget.PageSlug = normalizeCustomDomainFunnelPageSlug(target.RequestPath, funnel.Slug)
+	normalizedTarget.PageSlug = funnel.PageSlug
 	publishedSlug := funnel.Slug + "--" + normalizedTarget.PageSlug
 
 	h.logger.Info("db_sites custom domain path normalized",
@@ -332,6 +346,9 @@ func (h *Handler) lookupCustomDomainPublishedSite(ctx context.Context, target ro
 		zap.String("original_path", target.RequestPath),
 		zap.String("raw_page_slug", rawPageSlug),
 		zap.String("funnel_slug", funnel.Slug),
+		zap.String("route_mode", funnel.RouteMode),
+		zap.String("requested_funnel_slug", funnel.RequestedFunnel),
+		zap.String("requested_page_slug", funnel.RequestedPage),
 		zap.String("normalized_page_slug", normalizedTarget.PageSlug),
 		zap.String("expected_published_slug", publishedSlug),
 	)
@@ -347,6 +364,7 @@ func (h *Handler) lookupCustomDomainPublishedSite(ctx context.Context, target ro
 			zap.String("raw_page_slug", rawPageSlug),
 			zap.String("normalized_page_slug", normalizedTarget.PageSlug),
 			zap.String("funnel_slug", funnel.Slug),
+			zap.String("route_mode", funnel.RouteMode),
 		)
 		return site, found, code, nil
 	}
@@ -357,6 +375,7 @@ func (h *Handler) lookupCustomDomainPublishedSite(ctx context.Context, target ro
 		zap.String("raw_page_slug", rawPageSlug),
 		zap.String("normalized_page_slug", normalizedTarget.PageSlug),
 		zap.String("funnel_slug", funnel.Slug),
+		zap.String("route_mode", funnel.RouteMode),
 	)
 
 	site, found, code, err := h.queryCustomDomainPublishedPage(ctx, normalizedTarget, funnel, rawPageSlug, publishedSlug)
@@ -372,6 +391,7 @@ func (h *Handler) lookupCustomDomainPublishedSite(ctx context.Context, target ro
 			zap.String("published_slug", site.Slug),
 			zap.String("normalized_page_slug", normalizedTarget.PageSlug),
 			zap.String("funnel_slug", funnel.Slug),
+			zap.String("route_mode", funnel.RouteMode),
 		)
 		return site, true, http.StatusOK, nil
 	}
@@ -387,6 +407,7 @@ func (h *Handler) lookupCustomDomainPublishedSite(ctx context.Context, target ro
 		zap.Int("status", code),
 		zap.String("normalized_page_slug", normalizedTarget.PageSlug),
 		zap.String("funnel_slug", funnel.Slug),
+		zap.String("route_mode", funnel.RouteMode),
 	)
 	return nil, false, code, nil
 }
@@ -435,12 +456,20 @@ func (h *Handler) lookupCustomDomainFunnel(ctx context.Context, target routeTarg
 	)
 
 	var funnel customDomainFunnel
-	err := h.pool.QueryRow(ctx, h.customDomainFunnelQuery, target.Host).Scan(
+	firstSegment, secondSegment := firstTwoPathSegments(target.RequestPath)
+	err := h.pool.QueryRow(ctx, h.customDomainRouteQuery, target.Host, firstSegment, secondSegment).Scan(
 		&funnel.ID,
 		&funnel.Slug,
 		&funnel.Status,
 		&funnel.DomainStatus,
 		&funnel.Purpose,
+		&funnel.PageID,
+		&funnel.PageSlug,
+		&funnel.PageName,
+		&funnel.PageStatus,
+		&funnel.PageIsHomepage,
+		&funnel.PageHTMLBytes,
+		&funnel.RouteMode,
 	)
 	if err == pgx.ErrNoRows {
 		h.logger.Info("db_sites custom domain funnel query returned no rows",
@@ -461,7 +490,18 @@ func (h *Handler) lookupCustomDomainFunnel(ctx context.Context, target routeTarg
 		zap.String("funnel_status", funnel.Status),
 		zap.String("domain_status", funnel.DomainStatus),
 		zap.String("purpose", funnel.Purpose),
+		zap.String("requested_funnel_slug", firstSegment),
+		zap.String("requested_page_slug", secondSegment),
+		zap.String("route_mode", funnel.RouteMode),
+		zap.String("site_page_id", funnel.PageID),
+		zap.String("site_page_slug", funnel.PageSlug),
+		zap.String("site_page_name", funnel.PageName),
+		zap.String("site_page_status", funnel.PageStatus),
+		zap.Bool("site_page_is_homepage", funnel.PageIsHomepage),
+		zap.Int64("site_page_html_bytes", funnel.PageHTMLBytes),
 	)
+	funnel.RequestedFunnel = firstSegment
+	funnel.RequestedPage = secondSegment
 
 	if funnel.DomainStatus != "verified" || (funnel.Purpose != "" && funnel.Purpose != "funnel") {
 		return customDomainFunnel{}, false, http.StatusForbidden, nil
@@ -758,17 +798,88 @@ type domainDiagnostic struct {
 	HTMLBytes             sql.NullInt64
 }
 
-const customDomainFunnelSQLTemplate = `
+const customDomainRouteSQLTemplate = `
+WITH candidates AS (
+	SELECT
+		sf.id,
+		sf.slug,
+		sf.status,
+		pd.status AS domain_status,
+		COALESCE(pd.purpose, '') AS purpose,
+		CASE WHEN sf.slug = $2 THEN true ELSE false END AS funnel_slug_matched
+	FROM %s pd
+	JOIN %s sf ON sf.platform_domain_id = pd.id
+	WHERE lower(pd.domain) = lower($1)
+	   OR lower(sf.domain) = lower($1)
+),
+selected_funnel AS (
+	SELECT
+		candidates.*,
+		CASE
+			WHEN funnel_slug_matched THEN NULLIF($3, '')
+			ELSE NULLIF($2, '')
+		END AS requested_page_slug,
+		CASE
+			WHEN funnel_slug_matched THEN 'funnel_slug_prefix'
+			ELSE 'domain_default'
+		END AS route_mode
+	FROM candidates
+	JOIN %s sp ON sp.funnel_id = candidates.id
+	WHERE (
+		CASE
+			WHEN funnel_slug_matched THEN NULLIF($3, '')
+			ELSE NULLIF($2, '')
+		END IS NULL
+		AND sp.is_homepage = true
+	)
+	OR (
+		CASE
+			WHEN funnel_slug_matched THEN NULLIF($3, '')
+			ELSE NULLIF($2, '')
+		END IS NOT NULL
+		AND sp.slug = CASE
+			WHEN funnel_slug_matched THEN NULLIF($3, '')
+			ELSE NULLIF($2, '')
+		END
+	)
+	ORDER BY
+		CASE WHEN funnel_slug_matched THEN 0 ELSE 1 END,
+		CASE WHEN status = 'published' THEN 0 ELSE 1 END,
+		CASE WHEN sp.status = 'published' THEN 0 ELSE 1 END,
+		sp.is_homepage DESC,
+		sp.sort_order,
+		sp.updated_at DESC,
+		slug
+	LIMIT 1
+)
 SELECT
 	sf.id::text,
 	sf.slug,
 	sf.status,
-	pd.status,
-	COALESCE(pd.purpose, '')
-FROM %s pd
-JOIN %s sf ON sf.platform_domain_id = pd.id
-WHERE lower(pd.domain) = lower($1)
-   OR lower(sf.domain) = lower($1)
+	sf.domain_status,
+	sf.purpose,
+	sp.id::text,
+	sp.slug,
+	COALESCE(sp.name, ''),
+	sp.status,
+	sp.is_homepage,
+	COALESCE(LENGTH(sp.html_content), 0),
+	sf.route_mode
+FROM selected_funnel sf
+JOIN %s sp ON sp.funnel_id = sf.id
+WHERE (
+	sf.requested_page_slug IS NULL
+	AND sp.is_homepage = true
+)
+OR (
+	sf.requested_page_slug IS NOT NULL
+	AND sp.slug = sf.requested_page_slug
+)
+ORDER BY
+	CASE WHEN sp.status = 'published' THEN 0 ELSE 1 END,
+	sp.is_homepage DESC,
+	sp.sort_order,
+	sp.updated_at DESC
 LIMIT 1`
 
 const customDomainPublishedPageSQLTemplate = `

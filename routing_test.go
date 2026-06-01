@@ -35,6 +35,18 @@ func TestNormalizeCustomDomainFunnelPageSlug(t *testing.T) {
 	}
 }
 
+func TestFirstTwoPathSegments(t *testing.T) {
+	first, second := firstTwoPathSegments("/test-funnel-domain/home")
+	if first != "test-funnel-domain" || second != "home" {
+		t.Fatalf("unexpected segments: %q %q", first, second)
+	}
+
+	first, second = firstTwoPathSegments("/")
+	if first != "" || second != "" {
+		t.Fatalf("unexpected root segments: %q %q", first, second)
+	}
+}
+
 func TestWeakETagStable(t *testing.T) {
 	a := weakETag("<html>ok</html>")
 	b := weakETag("<html>ok</html>")
