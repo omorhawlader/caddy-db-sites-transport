@@ -26,6 +26,7 @@ func init() {
 }
 
 const defaultCacheClearPath = "/db-sites/cache/clear"
+const routeQueryVersion = "custom-domain-route-v3-explicit-status-aliases"
 
 var safeIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
@@ -131,6 +132,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	h.cache = newResponseCache()
 	h.logDatabaseMetadata(context.Background())
 	h.logger.Info("db_sites provisioned",
+		zap.String("route_query_version", routeQueryVersion),
 		zap.String("database_url", redactDatabaseURL(h.DatabaseURL)),
 		zap.String("database_host", cfg.ConnConfig.Host),
 		zap.Uint16("database_port", cfg.ConnConfig.Port),
@@ -480,7 +482,14 @@ func (h *Handler) lookupCustomDomainFunnel(ctx context.Context, target routeTarg
 		return customDomainFunnel{}, false, code, err
 	}
 	if err != nil {
-		return customDomainFunnel{}, false, 0, fmt.Errorf("query custom domain funnel: %w", err)
+		h.logger.Error("db_sites custom domain route query failed",
+			zap.String("route_query_version", routeQueryVersion),
+			zap.String("host", target.Host),
+			zap.String("first_path_segment", firstSegment),
+			zap.String("second_path_segment", secondSegment),
+			zap.Error(err),
+		)
+		return customDomainFunnel{}, false, 0, fmt.Errorf("query custom domain funnel (%s): %w", routeQueryVersion, err)
 	}
 
 	h.logger.Info("db_sites custom domain funnel found",
