@@ -803,7 +803,7 @@ WITH candidates AS (
 	SELECT
 		sf.id,
 		sf.slug,
-		sf.status,
+		sf.status AS funnel_status,
 		pd.status AS domain_status,
 		COALESCE(pd.purpose, '') AS purpose,
 		CASE WHEN sf.slug = $2 THEN true ELSE false END AS funnel_slug_matched
@@ -844,7 +844,7 @@ selected_funnel AS (
 	)
 	ORDER BY
 		CASE WHEN funnel_slug_matched THEN 0 ELSE 1 END,
-		CASE WHEN candidates.status = 'published' THEN 0 ELSE 1 END,
+		CASE WHEN candidates.funnel_status = 'published' THEN 0 ELSE 1 END,
 		CASE WHEN sp.status = 'published' THEN 0 ELSE 1 END,
 		sp.is_homepage DESC,
 		sp.sort_order,
@@ -855,7 +855,7 @@ selected_funnel AS (
 SELECT
 	sf.id::text,
 	sf.slug,
-	sf.status,
+	sf.funnel_status,
 	sf.domain_status,
 	sf.purpose,
 	sp.id::text,
