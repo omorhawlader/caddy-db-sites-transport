@@ -844,12 +844,12 @@ selected_funnel AS (
 	)
 	ORDER BY
 		CASE WHEN funnel_slug_matched THEN 0 ELSE 1 END,
-		CASE WHEN status = 'published' THEN 0 ELSE 1 END,
+		CASE WHEN candidates.status = 'published' THEN 0 ELSE 1 END,
 		CASE WHEN sp.status = 'published' THEN 0 ELSE 1 END,
 		sp.is_homepage DESC,
 		sp.sort_order,
 		sp.updated_at DESC,
-		slug
+		candidates.slug
 	LIMIT 1
 )
 SELECT
