@@ -4,16 +4,16 @@ import "testing"
 
 func TestReplaceMergeTokens(t *testing.T) {
 	values := map[string]string{
-		"company.name":       "Omar Inc",
-		"contact.first_name": "Omar",
+		"company.name":       "acme Inc",
+		"contact.first_name": "acme",
 	}
 	cases := map[string]string{
-		"<h1>{{company.name}}</h1>":                 "<h1>Omar Inc</h1>",
-		"Hi {{ contact.first_name }}!":              "Omar!",
-		"{%company.name%}":                          "Omar Inc",
+		"<h1>{{company.name}}</h1>":                 "<h1>acme Inc</h1>",
+		"Hi {{ contact.first_name }}!":              "acme!",
+		"{%company.name%}":                          "acme Inc",
 		"<p>{{company.unknown}}</p>":                "<p></p>",                        // unresolved merge token → blank
 		"<code>{{ notAToken() }}</code>":            "<code>{{ notAToken() }}</code>", // non-merge braces left as-is
-		`<span data-merge-token="company.name" class="merge-token-pill">{{company.name}}</span>`: "Omar Inc",
+		`<span data-merge-token="company.name" class="merge-token-pill">{{company.name}}</span>`: "acme Inc",
 	}
 	for in, want := range cases {
 		if got := replaceMergeTokens(in, values); got != want {
