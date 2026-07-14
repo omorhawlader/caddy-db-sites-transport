@@ -38,5 +38,6 @@ Thumbs.db
 
 # local test build/config
 caddy-dbsites
+caddy-dbsites-test
 Caddyfile.local
 buildenv_*

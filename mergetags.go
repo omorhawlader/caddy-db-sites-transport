@@ -4,6 +4,8 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
@@ -11,6 +13,8 @@ import (
 
 
 const accountValuesSQLTemplate = `SELECT value_key, COALESCE(value_text, '') FROM %s WHERE sub_account_id = $1`
+
+const subAccountTZSQLTemplate = `SELECT COALESCE(timezone, '') FROM %s WHERE id = $1 LIMIT 1`
 
 const contactStandardSQLTemplate = `SELECT COALESCE(first_name, ''), COALESCE(last_name, ''), COALESCE(email, ''), COALESCE(phone, ''), COALESCE(company, ''), COALESCE(display_name, '') FROM %s WHERE id = $1 AND sub_account_id = $2 LIMIT 1`
 
@@ -64,6 +68,8 @@ func replaceMergeTokens(html string, values map[string]string) string {
 func (h *Handler) buildMergeValues(ctx context.Context, subAccountID, contactID string) map[string]string {
 	values := make(map[string]string)
 	if subAccountID == "" {
+		// No tenant context: still resolve dynamic time.* so they never render blank.
+		overlayTimeValues(values, time.Now().UTC())
 		return values
 	}
 
@@ -86,7 +92,85 @@ func (h *Handler) buildMergeValues(ctx context.Context, subAccountID, contactID 
 	if contactID != "" && uuidRe.MatchString(contactID) {
 		h.addContactValues(ctx, values, subAccountID, contactID)
 	}
+
+	// Dynamic time.* tokens are computed live in the sub-account's timezone and
+	// applied LAST, so they override the (usually empty) stored time.* placeholder
+	// rows in account_custom_values. Mirrors the frontend's runtimeTimeValues().
+	overlayTimeValues(values, time.Now().In(h.subAccountLocation(ctx, subAccountID)))
 	return values
+}
+
+// locCache memoizes parsed *time.Location by IANA name so we don't hit tzdata on
+// every request.
+var locCache sync.Map // string -> *time.Location
+
+// subAccountLocation resolves the sub-account's configured IANA timezone. Falls
+// back to UTC when it's unset, unknown, or the lookup fails.
+func (h *Handler) subAccountLocation(ctx context.Context, subAccountID string) *time.Location {
+	var tz string
+	if err := h.pool.QueryRow(ctx, h.subAccountTZQuery, subAccountID).Scan(&tz); err != nil {
+		if err != pgx.ErrNoRows {
+			h.logger.Warn("db_sites sub-account timezone query failed", zap.String("sub_account_id", subAccountID), zap.Error(err))
+		}
+		return time.UTC
+	}
+	tz = strings.TrimSpace(tz)
+	if tz == "" {
+		return time.UTC
+	}
+	if v, ok := locCache.Load(tz); ok {
+		return v.(*time.Location)
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		h.logger.Warn("db_sites unknown sub-account timezone, using UTC", zap.String("sub_account_id", subAccountID), zap.String("timezone", tz), zap.Error(err))
+		loc = time.UTC
+	}
+	locCache.Store(tz, loc)
+	return loc
+}
+
+func overlayTimeValues(values map[string]string, now time.Time) {
+	for k, v := range runtimeTimeValues(now) {
+		values[k] = v
+	}
+}
+
+// runtimeTimeValues computes the dynamic time.* merge tokens, mirroring the
+// frontend's runtimeTimeValues() in formMergeValues.ts (en-GB / dd-mm-yyyy,
+// zero-padded, English weekday/month names) so {{time.today}}, {{time.now}}, etc.
+// resolve on the published site exactly as they do in previews and emails.
+func runtimeTimeValues(now time.Time) map[string]string {
+	year := now.Format("2006")
+	month := now.Format("01")
+	day := now.Format("02")
+	hour24 := now.Format("15")
+	hour12 := now.Format("03")
+	minute := now.Format("04")
+	second := now.Format("05")
+	amPm := now.Format("PM")
+	dayName := now.Format("Monday")
+	monthName := now.Format("January")
+	return map[string]string{
+		"time.second":            second,
+		"time.minute":            minute,
+		"time.hour_24h_format":   hour24,
+		"time.hour_am_pm_format": hour12,
+		"time.time_24h_format":   hour24 + ":" + minute,
+		"time.time_am_pm_format": hour12 + ":" + minute + " " + amPm,
+		"time.am_pm":             amPm,
+		"time.day":               day,
+		"time.day_in_english":    dayName,
+		"time.day_of_week":       dayName,
+		"time.month":             month,
+		"time.month_in_english":  monthName,
+		"time.year":              year,
+		"time.year_last_2_digit": now.Format("06"),
+		"time.date_us_format":    month + "/" + day + "/" + year,
+		"time.date_in_format":    day + "/" + month + "/" + year,
+		"time.today":             day + "/" + month + "/" + year,
+		"time.now":               day + "/" + month + "/" + year + " " + hour12 + ":" + minute + " " + amPm,
+	}
 }
 
 func (h *Handler) addContactValues(ctx context.Context, values map[string]string, subAccountID, contactID string) {

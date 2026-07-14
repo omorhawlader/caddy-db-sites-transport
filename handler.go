@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	_ "time/tzdata" // embed the IANA tz database so LoadLocation works on any host
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -52,6 +53,7 @@ type Handler struct {
 	contactStandardQuery string
 	contactCustomQuery   string
 	customDomainSEOQuery string
+	subAccountTZQuery    string
 }
 
 type publishedSite struct {
@@ -119,6 +121,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	h.contactStandardQuery = fmt.Sprintf(contactStandardSQLTemplate, qualifiedTable(h.Schema, "contacts"))
 	h.contactCustomQuery = fmt.Sprintf(contactCustomSQLTemplate, qualifiedTable(h.Schema, "contact_custom_field_values"), qualifiedTable(h.Schema, "custom_fields"))
 	h.customDomainSEOQuery = fmt.Sprintf(customDomainSEOSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"))
+	h.subAccountTZQuery = fmt.Sprintf(subAccountTZSQLTemplate, qualifiedTable(h.Schema, "sub_accounts"))
 
 	cfg, err := pgxpool.ParseConfig(h.DatabaseURL)
 	if err != nil {
