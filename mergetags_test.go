@@ -9,7 +9,7 @@ func TestReplaceMergeTokens(t *testing.T) {
 	}
 	cases := map[string]string{
 		"<h1>{{company.name}}</h1>":                 "<h1>acme Inc</h1>",
-		"Hi {{ contact.first_name }}!":              "acme!",
+		"Hi {{ contact.first_name }}!":              "Hi acme!",
 		"{%company.name%}":                          "acme Inc",
 		"<p>{{company.unknown}}</p>":                "<p></p>",                        // unresolved merge token → blank
 		"<code>{{ notAToken() }}</code>":            "<code>{{ notAToken() }}</code>", // non-merge braces left as-is

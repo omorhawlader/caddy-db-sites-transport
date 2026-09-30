@@ -27,7 +27,7 @@ func init() {
 }
 
 const defaultCacheClearPath = "/db-sites/cache/clear"
-const routeQueryVersion = "custom-domain-route-v3-explicit-status-aliases"
+const routeQueryVersion = "custom-domain-route-v4.2-rpc-mergetokens"
 
 var safeIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
@@ -109,12 +109,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if !safeIdentifier.MatchString(h.Schema) {
 		return fmt.Errorf("db_sites: invalid schema %q (must match %s)", h.Schema, safeIdentifier.String())
 	}
-	h.customDomainRouteQuery = fmt.Sprintf(customDomainRouteSQLTemplate,
-		qualifiedTable(h.Schema, "platform_domains"),
-		qualifiedTable(h.Schema, "site_funnels"),
-		qualifiedTable(h.Schema, "site_pages"),
-		qualifiedTable(h.Schema, "site_pages"),
-	)
+	h.customDomainRouteQuery = customDomainRouteRPC
 	h.customDomainPublishedPageQuery = fmt.Sprintf(customDomainPublishedPageSQLTemplate, qualifiedTable(h.Schema, "published_sites"))
 	h.customDomainStatusQuery = fmt.Sprintf(customDomainStatusSQLTemplate, qualifiedTable(h.Schema, "platform_domains"), qualifiedTable(h.Schema, "site_funnels"))
 	h.accountValuesQuery = fmt.Sprintf(accountValuesSQLTemplate, qualifiedTable(h.Schema, "account_custom_values"))
@@ -845,100 +840,10 @@ type domainDiagnostic struct {
 	HTMLBytes             sql.NullInt64
 }
 
-const customDomainRouteSQLTemplate = `
-WITH candidates AS (
-	SELECT
-		sf.id,
-		sf.slug,
-		sf.serve_at_root,
-		sf.sub_account_id,
-		sf.status AS funnel_status,
-		pd.status AS domain_status,
-		COALESCE(pd.purpose, '') AS purpose,
-		CASE WHEN sf.slug = $2 THEN true ELSE false END AS funnel_slug_matched
-	FROM %s pd
-	JOIN %s sf ON sf.platform_domain_id = pd.id
-	WHERE lower(pd.domain) = lower($1)
-	   OR lower(sf.domain) = lower($1)
-	   OR (pd.include_www AND lower('www.' || pd.domain) = lower($1))
-),
-selected_funnel AS (
-	SELECT
-		candidates.id AS funnel_id,
-		candidates.slug AS funnel_slug,
-		candidates.funnel_status AS funnel_status,
-		candidates.domain_status AS domain_status,
-		candidates.purpose AS purpose,
-		candidates.funnel_slug_matched AS funnel_slug_matched,
-		candidates.sub_account_id AS sub_account_id,
-		CASE
-			WHEN candidates.funnel_slug_matched THEN NULLIF($3, '')
-			ELSE NULLIF($2, '')
-		END AS requested_page_slug,
-		CASE
-			WHEN candidates.funnel_slug_matched THEN 'funnel_slug_prefix'
-			ELSE 'domain_default'
-		END AS route_mode
-	FROM candidates
-	JOIN %s sp ON sp.funnel_id = candidates.id
-	WHERE (
-		CASE
-			WHEN candidates.funnel_slug_matched THEN NULLIF($3, '')
-			ELSE NULLIF($2, '')
-		END IS NULL
-		AND sp.is_homepage = true
-	)
-	OR (
-		CASE
-			WHEN candidates.funnel_slug_matched THEN NULLIF($3, '')
-			ELSE NULLIF($2, '')
-		END IS NOT NULL
-		AND sp.slug = CASE
-			WHEN candidates.funnel_slug_matched THEN NULLIF($3, '')
-			ELSE NULLIF($2, '')
-		END
-	)
-	ORDER BY
-		CASE WHEN candidates.funnel_slug_matched THEN 0 ELSE 1 END,
-		CASE WHEN candidates.serve_at_root THEN 0 ELSE 1 END,
-		CASE WHEN candidates.funnel_status = 'published' THEN 0 ELSE 1 END,
-		CASE WHEN sp.status = 'published' THEN 0 ELSE 1 END,
-		sp.is_homepage DESC,
-		sp.sort_order,
-		sp.updated_at DESC,
-		candidates.slug
-	LIMIT 1
-)
-SELECT
-	sf.funnel_id::text,
-	sf.funnel_slug,
-	sf.funnel_status,
-	sf.domain_status,
-	sf.purpose,
-	sp.id::text,
-	sp.slug,
-	COALESCE(sp.name, ''),
-	sp.status,
-	sp.is_homepage,
-	COALESCE(LENGTH(sp.html_content), 0),
-	sf.route_mode,
-	sf.sub_account_id::text
-FROM selected_funnel sf
-JOIN %s sp ON sp.funnel_id = sf.funnel_id
-WHERE (
-	sf.requested_page_slug IS NULL
-	AND sp.is_homepage = true
-)
-OR (
-	sf.requested_page_slug IS NOT NULL
-	AND sp.slug = sf.requested_page_slug
-)
-ORDER BY
-	CASE WHEN sp.status = 'published' THEN 0 ELSE 1 END,
-	sp.is_homepage DESC,
-	sp.sort_order,
-	sp.updated_at DESC
-LIMIT 1`
+// resolve_caddy_page returns the same 13 columns the former inline route SQL
+// did (see the Scan in lookupCustomDomainFunnel); its host arms are
+// index-backed UNIONs and page length comes from site_pages.html_content_length.
+const customDomainRouteRPC = `SELECT * FROM resolve_caddy_page($1, $2, $3)`
 
 const customDomainPublishedPageSQLTemplate = `
 SELECT
@@ -948,7 +853,7 @@ SELECT
 	ps.html_content,
 	ps.updated_at
 FROM %s ps
-WHERE ps.funnel_id::text = $1
+WHERE ps.funnel_id = $1::uuid
   AND ps.slug = $2
   AND ps.html_content IS NOT NULL
 LIMIT 1`
@@ -979,7 +884,7 @@ SELECT
 	sp.name,
 	sp.is_homepage,
 	sp.status,
-	LENGTH(sp.html_content),
+	COALESCE(sp.html_content_length, 0),
 	sp.updated_at,
 	CASE
 		WHEN sf.slug IS NULL THEN NULL
@@ -988,15 +893,29 @@ SELECT
 	END AS expected_published_slug,
 	ps.slug,
 	ps.custom_domain,
-	LENGTH(ps.html_content)
-FROM %s pd
-LEFT JOIN %s sf ON sf.platform_domain_id = pd.id
-LEFT JOIN %s sp ON sp.funnel_id = sf.id AND (sp.slug = $2 OR ($2 = 'index' AND sp.is_homepage = true))
-LEFT JOIN %s ps ON ps.funnel_id = sf.id AND ps.slug = sf.slug || '--' || COALESCE(sp.slug, $2)
-WHERE lower(pd.domain) = lower($1)
-   OR lower(sf.domain) = lower($1)
-   OR lower(ps.custom_domain) = lower($1)
-   OR (pd.include_www AND lower('www.' || pd.domain) = lower($1))
+	COALESCE(ps.html_content_length, 0)
+FROM %[1]s pd
+LEFT JOIN %[2]s sf ON sf.platform_domain_id = pd.id
+LEFT JOIN %[3]s sp ON sp.funnel_id = sf.id AND (sp.slug = $2 OR ($2 = 'index' AND sp.is_homepage = true))
+LEFT JOIN %[4]s ps ON ps.funnel_id = sf.id AND ps.slug = sf.slug || '--' || COALESCE(sp.slug, $2)
+WHERE pd.id IN (
+		SELECT id FROM %[1]s WHERE lower(domain) = lower($1)
+	UNION
+		SELECT id FROM %[1]s WHERE include_www AND lower('www.' || domain) = lower($1)
+	UNION
+		SELECT platform_domain_id FROM %[2]s
+		WHERE domain IS NOT NULL AND domain <> '' AND lower(domain) = lower($1)
+	UNION
+		SELECT f.platform_domain_id FROM %[2]s f
+		JOIN %[4]s p ON p.funnel_id = f.id
+		WHERE p.custom_domain IS NOT NULL AND p.custom_domain <> '' AND lower(p.custom_domain) = lower($1)
+)
+  AND (
+	   lower(pd.domain) = lower($1)
+	OR lower(sf.domain) = lower($1)
+	OR lower(ps.custom_domain) = lower($1)
+	OR (pd.include_www AND lower('www.' || pd.domain) = lower($1))
+  )
 LIMIT 10`
 
 var (
