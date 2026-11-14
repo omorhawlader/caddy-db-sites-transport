@@ -246,7 +246,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		zap.String("schema", h.Schema),
 	)
 
-	site, found, code, err := h.lookupPublishedSite(r.Context(), target)
+	site, found, code, err := h.lookupSite(r.Context(), target)
 	if err != nil {
 		h.logger.Error("db_sites request failed: published site lookup error",
 			zap.String("host", host),
@@ -270,7 +270,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	// copy keeps raw tokens, so editing a value takes effect without republishing.
 	// Token-free pages skip this entirely (no extra query, cached ETag stays stable).
 	served := site
-	if htmlHasMergeTokens(site.HTML) {
+	if site.ResolvedVia != routeMicroApp && htmlHasMergeTokens(site.HTML) {
 		values := h.buildMergeValues(r.Context(), site.SubAccountID, r.URL.Query().Get("cid"))
 		resolved := replaceMergeTokens(site.HTML, values)
 		if resolved != site.HTML {
@@ -301,6 +301,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	)
 	writeHTML(w, r, served, h.CacheControl)
 	return nil
+}
+
+// lookupSite tries a Micro Saas app domain first (one cached lookup per host), then the funnel path.
+// A failed app lookup (DB blip, plugin deployed before its migration) must never take funnels down:
+// it is logged and the request continues on the funnel path, which keeps serving from its own cache.
+func (h *Handler) lookupSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
+	app, handled, code, err := h.lookupMicroApp(ctx, target.Host)
+	if err != nil {
+		h.logger.Warn("db_sites micro app lookup failed; trying the funnel path", zap.String("host", target.Host), zap.Error(err))
+		return h.lookupPublishedSite(ctx, target)
+	}
+	if handled {
+		return app, app != nil, code, nil
+	}
+	return h.lookupPublishedSite(ctx, target)
 }
 
 func (h *Handler) lookupPublishedSite(ctx context.Context, target routeTarget) (*publishedSite, bool, int, error) {
